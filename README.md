@@ -1,221 +1,145 @@
-# aicx: Multiple accounts for Codex and Claude Code
+<h1 align="center">aicx</h1>
+<p align="center"><i>Switch between Codex and Claude Code accounts without losing local conversation history.</i></p>
 
-`aicx` is a small Linux CLI for keeping several Codex and Claude Code accounts
-on one machine. Each account has its own credentials and settings, while saved
-conversations are shared between accounts by default.
+<div align="center">
+  <a href="https://pypi.org/project/aicx/"><img src="https://img.shields.io/pypi/v/aicx" alt="PyPI version"></a>
+  <a href="https://pypi.org/project/aicx/"><img src="https://img.shields.io/pypi/pyversions/aicx" alt="Python versions"></a>
+  <a href="https://github.com/MorenoLaQuatra/aicx/stargazers"><img src="https://img.shields.io/github/stars/MorenoLaQuatra/aicx" alt="GitHub stars"></a>
+  <a href="https://github.com/MorenoLaQuatra/aicx/blob/main/LICENSE"><img src="https://img.shields.io/github/license/MorenoLaQuatra/aicx" alt="License"></a>
+</div>
 
-Use it when you want to switch between work and personal subscriptions without
-logging in again or losing access to previous conversations.
+<br>
+
+`aicx` keeps credentials and settings separate for every account. Saved
+conversations are shared by default, so you can start with one account and
+continue with another.
 
 ## Install
 
-Requirements:
-
-- Linux
-- Python 3.11 or newer
-- Codex, Claude Code, or both already installed
-
-From a cloned checkout:
+You need Linux, Python 3.11 or newer, and the official Codex or Claude Code CLI.
 
 ```bash
-pipx install .
+pip install aicx
 aicx doctor
 ```
 
-Without `pipx`:
+## Set up two accounts
+
+Log in with the official CLI, then let `aicx` adopt that account under a name.
+
+### Codex example
 
 ```bash
-python3 -m pip install --user .
-aicx doctor
-```
-
-## Set up accounts
-
-Create a named profile and log in once:
-
-```bash
-aicx login codex work --device-auth
-aicx login codex personal --device-auth
-
-aicx login claude work --sso
-aicx login claude personal --sso
-```
-
-If you already use Codex or Claude Code, adopt that login instead. This copies
-the existing provider home into a profile and leaves the original untouched.
-
-```bash
+# First account
+codex login
 aicx adopt codex personal
+codex logout
+
+# Second account
+codex login
+aicx adopt codex work
+```
+
+`adopt` copies the current login, settings, and saved conversations. It does not
+change or remove the original Codex directory.
+
+### Claude Code example
+
+```bash
+# First account
+claude auth login
 aicx adopt claude personal
+claude auth logout
+
+# Second account
+claude auth login
+aicx adopt claude work
 ```
 
-Use `--from PATH` when the existing provider home is in a custom location:
+Profile names are yours to choose. `personal`, `work`, and `client` are only
+examples.
+
+## Use an account
+
+Launch the provider with `@account-name`:
 
 ```bash
-aicx adopt codex work --from ~/.codex-work
-```
-
-Adoption never overwrites an existing profile.
-
-## Daily use
-
-Put `@profile` immediately after the provider name:
-
-```bash
-aicx codex @work
 aicx codex @personal
-aicx claude @work
+aicx codex @work
+aicx claude @personal
 ```
 
-The selection is remembered, so the shorter form uses the last account:
+The last selection is remembered:
 
 ```bash
 aicx codex
 aicx claude
 ```
 
-Provider arguments pass through unchanged:
+Provider arguments pass through normally:
 
 ```bash
 aicx codex @work resume --last
 aicx claude @personal --resume SESSION_ID
 ```
 
-`aicx` synchronizes saved conversations before launch and after exit. Start a
-conversation with one account, exit normally, then resume it with another:
-
-```bash
-aicx codex @personal
-aicx codex @work resume --last
-```
-
-Do not open the same saved session with two accounts at the same time. Sequential
-handoff is supported, concurrent writing to one transcript is not.
-
-## Accounts and balance
+## Accounts and usage
 
 ```bash
 aicx accounts
-aicx accounts codex
 aicx balance
 aicx balance codex --profile work
 ```
 
-`aicx accounts` shows the account email when the provider exposes it.
-
-`aicx balance` shows usage, remaining percentage, the local reset time, and a
-human-readable countdown. Keep it open like `watch` with:
+Keep the balance view open and refresh it every 60 seconds:
 
 ```bash
 aicx balance --watch
+```
+
+Choose another interval when needed:
+
+```bash
 aicx balance --watch --interval 15
-aicx balance codex --watch --interval 30
 ```
 
-`--continuous` is an alias for `--watch`. The default refresh interval is 60
-seconds. Press `Ctrl+C` to stop.
+The balance table shows usage, remaining percentage, reset time, and the time
+left until reset.
 
-Codex usage is read live from its local app server. Claude usage is captured
-from Claude Code's status-line payload and appears after the first response in
-each profile. `aicx` installs its collector during Claude login or adoption when
-no other status line is configured. It never replaces an existing status line.
+## Conversation history
 
-For scripts, use JSON output without watch mode:
+`aicx` synchronizes saved history before a provider starts and after it exits.
+This lets you exit a conversation and resume it with another account.
 
-```bash
-aicx accounts --json
-aicx balance --json
-aicx sessions codex --json
-```
-
-## Shared conversation history
-
-History sharing is enabled separately for Codex and Claude Code.
-
-- Codex shares saved and archived JSONL sessions.
-- Claude shares project transcripts, spilled session tool results, project
-  memory, and file checkpoints needed for rewind.
-- Credentials, provider settings, logs, plugins, caches, and runtimes stay inside
-  each account profile.
-- Active profiles are not copied while an `aicx` managed process is writing.
-  They synchronize after that process exits.
-
-Inspect or manually synchronize history with:
+Do not open the same conversation from two accounts at the same time. History
+sharing supports sequential handoff, not concurrent editing.
 
 ```bash
+# Manual synchronization
 aicx sync codex
 aicx sync claude
-aicx sessions codex
-aicx sessions claude --all-profiles
-```
 
-To keep conversations isolated, set either variable before running `aicx`:
-
-```bash
+# Optional: disable sharing
 export AICX_CODEX_HISTORY=isolated
 export AICX_CLAUDE_HISTORY=isolated
 ```
 
-## Other useful commands
+Credentials remain private to each account profile. They are never shared with
+the conversation store.
 
-Select an account without launching it:
+## TODO
 
-```bash
-aicx use codex work
-aicx use personal
-```
+- Test the complete workflow with multiple real Claude Code accounts. Multiple
+  Codex accounts are tested.
+- Add and test VS Code account integration.
+- Add macOS support.
 
-Stop a process launched by `aicx`:
+## More documentation
 
-```bash
-aicx close codex PID
-aicx close claude all
-```
+- [Command cheatsheet](cheatsheet.md)
+- [Architecture and storage](docs/architecture.md)
+- [Contributing](CONTRIBUTING.md)
 
-Open an isolated VS Code window for a profile:
+## License
 
-```bash
-aicx vscode work .
-```
-
-Make bare `codex` and `claude` commands route through `aicx` in Bash:
-
-```bash
-eval "$(aicx shell-init bash)"
-```
-
-Use `zsh` instead of `bash` for Zsh. See [cheatsheet.md](cheatsheet.md) for the
-compact command list.
-
-## Storage and security
-
-Data is stored under `~/.local/share/aicx` by default:
-
-```text
-~/.local/share/aicx/
-├── profiles/            # private credentials and settings per account
-├── shared/              # synchronized conversation data
-├── run/                 # tracked process records
-├── state.json           # selected profile names
-└── vscode/              # isolated VS Code user data
-```
-
-Set `AICX_HOME` to use another location. Profile directories contain credentials
-and conversation text. Do not commit or share them. `aicx` delegates login to the
-official CLIs and does not print or exchange provider tokens.
-
-Environment API keys can override stored subscription logins. `aicx doctor`
-warns when `OPENAI_API_KEY` or `ANTHROPIC_API_KEY` is set.
-
-## Development and current limits
-
-Run the checks with:
-
-```bash
-PYTHONPATH=src python3 -m unittest discover -s tests -v
-python3 -m compileall -q src
-```
-
-Version 0.3 supports Linux. macOS support is planned. VS Code integration is a
-launcher for separate windows, not an account picker inside an existing window.
-See [docs/architecture.md](docs/architecture.md) for implementation details.
+[MIT](LICENSE)

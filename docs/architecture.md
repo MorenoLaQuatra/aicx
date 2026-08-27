@@ -18,8 +18,8 @@ name selected in state.json
 ```
 
 The preferred `aicx TOOL @PROFILE` form selects and launches in one operation.
-Selection writes only `state.json`; launching synchronizes persisted JSONL
-conversations, constructs a provider-specific environment, starts the official
+Selection writes only `state.json`; launching synchronizes persisted conversation
+files, constructs a provider-specific environment, starts the official
 executable, and records the PID plus its Linux `/proc` start ticks. Login is a
 separate one-time command.
 
@@ -68,13 +68,6 @@ single operating-system read.
 The status-line installer will not compose with or overwrite an existing hook.
 That conservative policy avoids executing or rewriting arbitrary shell commands.
 
-## VS Code
-
-`aicx vscode NAME PATH` starts `code` with provider environment variables and a
-per-name `--user-data-dir`. The user-data split is required because VS Code
-normally routes new windows to an existing process, whose inherited environment
-cannot be changed. Existing windows are deliberately unaffected.
-
 ## macOS plan
 
 Most code is already portable. The Linux guard makes the unsupported boundary
@@ -82,7 +75,6 @@ explicit while these areas are tested on macOS:
 
 1. Replace `/proc` PID identity with a portable process-start-time adapter.
 2. Verify profile-local provider credential behavior when Keychain is available.
-3. Test the `code` launcher and both official extensions with isolated user data.
-4. Add a macOS CI job and remove the platform guard only after end-to-end tests.
+3. Add a macOS CI job and remove the platform guard only after end-to-end tests.
 
 The on-disk profile layout and CLI syntax should not need to change.

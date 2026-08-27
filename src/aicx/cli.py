@@ -39,7 +39,6 @@ from .usage import (
     install_claude_usage_hook,
     read_claude_balance,
 )
-from .vscode import launch_vscode, vscode_launch_context
 
 
 _COLOR_ENABLED = False
@@ -96,8 +95,8 @@ or `aicx claude` uses the last selected profile. Login is never repeated.
 
 ADVANCED
   Existing commands remain available for explicit selection, synchronization,
-  session/process management, VS Code, and shell integration:
-    aicx use | sync | sessions | close | vscode | shell-init
+  session/process management, and shell integration:
+    aicx use | sync | sessions | close | shell-init
 
 Run `aicx COMMAND --help` for command-specific options.
 """,
@@ -175,11 +174,6 @@ Run `aicx COMMAND --help` for command-specific options.
             add_help=False,
         )
         tool_parser.add_argument("args", nargs=argparse.REMAINDER)
-
-    vscode_parser = subparsers.add_parser("vscode")
-    vscode_parser.add_argument("profile")
-    vscode_parser.add_argument("target", nargs="?", default=".")
-    vscode_parser.add_argument("extra_args", nargs=argparse.REMAINDER)
 
     hook_parser = subparsers.add_parser("usage-hook")
     hook_parser.add_argument("tool", choices=("claude",))
@@ -772,16 +766,6 @@ def command_sync(store: Store, args: argparse.Namespace) -> int:
     return 0
 
 
-def command_vscode(store: Store, args: argparse.Namespace) -> int:
-    extra = list(args.extra_args)
-    if extra[:1] == ["--"]:
-        extra = extra[1:]
-    pid = launch_vscode(store, args.profile, args.target, extra)
-    print(f"Opened isolated VS Code profile '{args.profile}' (launcher PID {pid}).")
-    print("This does not change existing VS Code windows and does not run a login command.")
-    return 0
-
-
 def command_shell_init(args: argparse.Namespace) -> int:
     print("# aicx shell integration")
     print("codex() { command aicx codex \"$@\"; }")
@@ -817,23 +801,6 @@ def command_doctor(store: Store) -> int:
             "warning" if credential_overrides else "ok",
         )
     )
-    vscode_binary = shutil.which("code")
-    rows.append(
-        (
-            "vscode",
-            vscode_binary or "not found (optional dependency)",
-            "ok" if vscode_binary else "missing (optional)",
-        )
-    )
-    if vscode_binary:
-        launch_context, launchable = vscode_launch_context()
-        rows.append(
-            (
-                "vscode launch",
-                launch_context,
-                "ok" if launchable else "unavailable here",
-            )
-        )
     rows.append(("aicx home", str(store.root), "ok"))
     print(format_table(("COMPONENT", "DETAIL", "STATUS"), rows))
     return 0 if linux else 1
@@ -858,8 +825,6 @@ def dispatch(store: Store, args: argparse.Namespace) -> int:
         return command_close(store, args)
     if args.command in TOOLS:
         return command_tool(store, args.command, args.args)
-    if args.command == "vscode":
-        return command_vscode(store, args)
     if args.command == "usage-hook":
         home = store.tool_home("claude", args.profile)
         if not home.is_dir():

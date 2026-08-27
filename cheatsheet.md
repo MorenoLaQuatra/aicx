@@ -3,22 +3,23 @@
 ## Install
 
 ```bash
-pipx install .
+pip install aicx
 aicx doctor
 ```
 
 ## Add accounts
 
 ```bash
-# New logins
-aicx login codex work --device-auth
-aicx login codex personal --device-auth
-aicx login claude work --sso
-aicx login claude personal --sso
-
-# Keep an existing login
+# Adopt the account currently used by each official CLI
+codex login
 aicx adopt codex personal
+
+claude auth login
 aicx adopt claude personal
+
+# Or log in directly inside a new aicx profile
+aicx login codex work --device-auth
+aicx login claude work --sso
 ```
 
 ## Launch and switch
@@ -91,12 +92,9 @@ aicx close codex SESSION_ID
 aicx close codex all
 ```
 
-## VS Code and shell helpers
+## Shell helpers
 
 ```bash
-aicx vscode work .
-aicx vscode personal ~/src/project
-
 # Add to .bashrc
 eval "$(aicx shell-init bash)"
 

@@ -41,7 +41,6 @@ from aicx.usage import (
     install_claude_usage_hook,
     read_claude_balance,
 )
-from aicx.vscode import build_vscode_command
 
 
 class TemporaryStoreTestCase(unittest.TestCase):
@@ -443,25 +442,6 @@ class ClaudeTests(TemporaryStoreTestCase):
 
         self.assertEqual(sessions[0]["id"], "abc")
         self.assertEqual(sessions[0]["state"], "saved")
-
-
-class VsCodeTests(TemporaryStoreTestCase):
-    def test_vscode_gets_both_profile_homes_and_a_distinct_instance(self) -> None:
-        codex_home = self.store.create_profile("codex", "work")
-        claude_home = self.store.create_profile("claude", "work")
-
-        with patch("aicx.vscode.shutil.which", return_value="/usr/bin/code"), patch.dict(
-            os.environ,
-            {"DISPLAY": ":0"},
-            clear=False,
-        ):
-            command, env = build_vscode_command(self.store, "work", ".")
-
-        self.assertEqual(env["CODEX_HOME"], str(codex_home))
-        self.assertEqual(env["CLAUDE_CONFIG_DIR"], str(claude_home))
-        self.assertIn("--new-window", command)
-        user_data_index = command.index("--user-data-dir") + 1
-        self.assertIn("/vscode/work/user-data", command[user_data_index])
 
 
 class ProcessTests(TemporaryStoreTestCase):
