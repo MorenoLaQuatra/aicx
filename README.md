@@ -84,6 +84,17 @@ aicx codex @work resume --last
 aicx claude @personal --resume SESSION_ID
 ```
 
+## Rename or delete a profile
+
+```bash
+aicx rename claude test1 personal   # move one tool's profile to a new name
+aicx forget claude personal         # delete one tool's profile (asks first; --yes skips)
+```
+
+Both act on a single tool. `forget` keeps the shared conversation history and
+leaves the other tool in that profile untouched. Neither works while a tracked
+process for that profile is still running.
+
 ## Accounts and usage
 
 ```bash

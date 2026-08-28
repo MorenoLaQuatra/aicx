@@ -104,6 +104,62 @@ class Store:
             ensure_codex_file_auth(home / "config.toml")
         return home
 
+    def _prune_profile_dir(self, profile: str) -> None:
+        """Remove the profile directory once it holds no tools."""
+        profile_dir = self.profiles_dir / profile
+        try:
+            if profile_dir.is_dir() and not any(profile_dir.iterdir()):
+                profile_dir.rmdir()
+        except OSError:
+            pass
+
+    def _rewrite_marker_profile(self, home: Path, profile: str) -> None:
+        marker = home / ".aicx-profile.json"
+        if not marker.is_file():
+            return
+        try:
+            data = json.loads(marker.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return
+        if isinstance(data, dict):
+            data["profile"] = profile
+            self._write_json(marker, data)
+
+    def remove_tool(self, tool: str, profile: str) -> None:
+        """Delete one tool's home from a profile and forget it from state.json."""
+        home = self.tool_home(tool, profile)
+        if not home.is_dir():
+            raise AicxError(f"Profile '{profile}' does not contain {tool}.")
+        shutil.rmtree(home)
+        self._prune_profile_dir(profile)
+        state = self.load_state()
+        if state["active"].get(tool) == profile:
+            state["active"].pop(tool, None)
+            state["schema"] = 1
+            self.ensure()
+            self._write_json(self.state_path, state)
+
+    def rename_tool(self, tool: str, old: str, new: str) -> Path:
+        """Move one tool's home from profile `old` to profile `new`."""
+        source = self.tool_home(tool, old)
+        if not source.is_dir():
+            raise AicxError(f"Profile '{old}' does not contain {tool}.")
+        target = self.tool_home(tool, new)
+        if target.exists():
+            raise AicxError(f"Profile '{new}' already contains {tool}.")
+        self.ensure()
+        target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self._chmod_private(target.parent)
+        source.replace(target)
+        self._prune_profile_dir(old)
+        self._rewrite_marker_profile(target, new)
+        state = self.load_state()
+        if state["active"].get(tool) == old:
+            state["active"][tool] = new
+            state["schema"] = 1
+            self._write_json(self.state_path, state)
+        return target
+
     def list_profiles(self, tool: str | None = None) -> list[tuple[str, str]]:
         if tool is not None:
             validate_tool(tool)

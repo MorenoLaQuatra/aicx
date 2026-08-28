@@ -131,7 +131,7 @@ or `aicx claude` uses the last selected profile. Login is never repeated.
 ADVANCED
   Existing commands remain available for explicit selection, synchronization,
   session/process management, and shell integration:
-    aicx use | sync | sessions | close | shell-init
+    aicx use | rename | forget | sync | sessions | close | shell-init
 
 Run `aicx COMMAND --help` for command-specific options.
 """,
@@ -163,6 +163,22 @@ Run `aicx COMMAND --help` for command-specific options.
 
     use_parser = subparsers.add_parser("use")
     use_parser.add_argument("selection", nargs="+", metavar="TOOL_OR_PROFILE")
+
+    forget_parser = subparsers.add_parser(
+        "forget", help="Delete a tool from a profile, including its credentials"
+    )
+    forget_parser.add_argument("tool", choices=TOOLS)
+    forget_parser.add_argument("profile")
+    forget_parser.add_argument(
+        "--yes", action="store_true", help="Skip the confirmation prompt"
+    )
+
+    rename_parser = subparsers.add_parser(
+        "rename", help="Rename a profile for one tool"
+    )
+    rename_parser.add_argument("tool", choices=TOOLS)
+    rename_parser.add_argument("old")
+    rename_parser.add_argument("new")
 
     accounts_parser = subparsers.add_parser("accounts", help="List profiles and authentication status")
     accounts_parser.add_argument("tool", nargs="?", choices=TOOLS)
@@ -434,6 +450,45 @@ def command_use(store: Store, args: argparse.Namespace) -> int:
     else:
         raise AicxError("Usage: aicx use PROFILE  or  aicx use TOOL PROFILE")
     print("No login command was run. Existing sessions keep their original account.")
+    return 0
+
+
+def _guard_no_running_process(store: Store, tool: str, profile: str) -> None:
+    running = ProcessRegistry(store).list(tool=tool, profile=profile)
+    if running:
+        raise AicxError(
+            f"{tool}/{profile} has a running process (PID {running[0]['pid']}). "
+            f"Close it first with: aicx close {tool} all"
+        )
+
+
+def command_forget(store: Store, args: argparse.Namespace) -> int:
+    if not store.profile_exists(args.tool, args.profile):
+        raise AicxError(f"Profile '{args.profile}' does not contain {args.tool}.")
+    _guard_no_running_process(store, args.tool, args.profile)
+    if not args.yes:
+        if not sys.stdin.isatty():
+            raise AicxError("Refusing to delete without confirmation; pass --yes.")
+        prompt = (
+            f"Delete {args.tool}/{args.profile} "
+            f"(credentials, settings, local session copies)? [y/N] "
+        )
+        if input(prompt).strip().lower() not in {"y", "yes"}:
+            print("Cancelled.")
+            return 1
+    store.remove_tool(args.tool, args.profile)
+    print(f"Removed {args.tool}/{args.profile}. Shared conversation history was kept.")
+    return 0
+
+
+def command_rename(store: Store, args: argparse.Namespace) -> int:
+    if not store.profile_exists(args.tool, args.old):
+        raise AicxError(f"Profile '{args.old}' does not contain {args.tool}.")
+    if store.profile_exists(args.tool, args.new):
+        raise AicxError(f"Profile '{args.new}' already contains {args.tool}.")
+    _guard_no_running_process(store, args.tool, args.old)
+    store.rename_tool(args.tool, args.old, args.new)
+    print(f"Renamed {args.tool}/{args.old} to {args.tool}/{args.new}.")
     return 0
 
 
@@ -896,6 +951,10 @@ def dispatch(store: Store, args: argparse.Namespace) -> int:
         return command_adopt(store, args)
     if args.command == "use":
         return command_use(store, args)
+    if args.command == "forget":
+        return command_forget(store, args)
+    if args.command == "rename":
+        return command_rename(store, args)
     if args.command == "accounts":
         return command_accounts(store, args)
     if args.command == "sync":

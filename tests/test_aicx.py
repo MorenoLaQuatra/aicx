@@ -16,6 +16,8 @@ from aicx.cli import (
     BALANCE_COLUMNS_PREFERENCE,
     build_parser,
     command_balance,
+    command_forget,
+    command_rename,
     command_tool,
     configure_color,
     format_cache_age,
@@ -337,6 +339,72 @@ class StoreTests(TemporaryStoreTestCase):
 
         with self.assertRaisesRegex(AicxError, "Available: personal"):
             command_tool(self.store, "codex", ["@missing"])
+
+
+class ForgetAndRenameTests(TemporaryStoreTestCase):
+    def test_forget_removes_one_tool_and_clears_the_active_pointer(self) -> None:
+        self.store.create_profile("codex", "personal")
+        self.store.create_profile("claude", "personal")
+        self.store.set_active("claude", "personal")
+
+        args = argparse.Namespace(tool="claude", profile="personal", yes=True)
+        output = StringIO()
+        with redirect_stdout(output):
+            self.assertEqual(command_forget(self.store, args), 0)
+
+        self.assertFalse(self.store.profile_exists("claude", "personal"))
+        self.assertTrue(self.store.profile_exists("codex", "personal"))
+        self.assertNotIn("claude", self.store.load_state()["active"])
+        with self.assertRaises(AicxError):
+            command_forget(self.store, args)
+
+    def test_forget_refuses_while_a_process_is_running(self) -> None:
+        self.store.create_profile("codex", "work")
+        registry = ProcessRegistry(self.store)
+        registry.add(os.getpid(), "codex", "work", ["codex"])
+        try:
+            args = argparse.Namespace(tool="codex", profile="work", yes=True)
+            with self.assertRaisesRegex(AicxError, "running process"):
+                command_forget(self.store, args)
+        finally:
+            registry.remove(os.getpid())
+
+    def test_rename_moves_the_home_marker_and_active_pointer(self) -> None:
+        home = self.store.create_profile("claude", "test1")
+        (home / "projects").mkdir()
+        (home / "projects" / "session.jsonl").write_text("{}\n", encoding="utf-8")
+        self.store.set_active("claude", "test1")
+
+        args = argparse.Namespace(tool="claude", old="test1", new="personal")
+        output = StringIO()
+        with redirect_stdout(output):
+            self.assertEqual(command_rename(self.store, args), 0)
+
+        self.assertFalse(self.store.profile_exists("claude", "test1"))
+        renamed = self.store.tool_home("claude", "personal")
+        self.assertEqual(
+            (renamed / "projects" / "session.jsonl").read_text(), "{}\n"
+        )
+        marker = json.loads((renamed / ".aicx-profile.json").read_text())
+        self.assertEqual(marker["profile"], "personal")
+        self.assertEqual(self.store.get_active("claude"), "personal")
+
+    def test_forget_needs_confirmation_when_not_a_tty(self) -> None:
+        self.store.create_profile("codex", "work")
+        args = argparse.Namespace(tool="codex", profile="work", yes=False)
+        with patch("aicx.cli.sys.stdin") as stdin:
+            stdin.isatty.return_value = False
+            with self.assertRaisesRegex(AicxError, "confirmation"):
+                command_forget(self.store, args)
+        self.assertTrue(self.store.profile_exists("codex", "work"))
+
+    def test_rename_refuses_to_overwrite_an_existing_profile(self) -> None:
+        self.store.create_profile("claude", "test1")
+        self.store.create_profile("claude", "personal")
+
+        args = argparse.Namespace(tool="claude", old="test1", new="personal")
+        with self.assertRaisesRegex(AicxError, "already contains"):
+            command_rename(self.store, args)
 
 
 class SharedHistoryTests(TemporaryStoreTestCase):

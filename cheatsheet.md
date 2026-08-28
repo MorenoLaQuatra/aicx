@@ -41,6 +41,10 @@ aicx claude @personal --resume SESSION_ID
 # Select without launching
 aicx use codex work
 aicx use personal
+
+# Rename or delete one tool's profile
+aicx rename claude test1 personal
+aicx forget claude personal        # add --yes to skip the prompt
 ```
 
 ## Accounts and usage
