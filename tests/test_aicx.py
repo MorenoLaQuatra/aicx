@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sqlite3
 import stat
 import tempfile
 import unittest
@@ -279,6 +280,34 @@ class StoreTests(TemporaryStoreTestCase):
         self.assertTrue(session.exists())
         self.assertFalse((target / "transient.pipe").exists())
 
+    def test_adopt_rebases_codex_thread_paths_to_the_profile_home(self) -> None:
+        source = self.root / ".codex"
+        session_id = "01a03cc1-2ff1-72d2-902d-e9208da115e2"
+        relative = Path(
+            "sessions/2026/08/26/"
+            f"rollout-2026-08-26T08-28-08-{session_id}.jsonl"
+        )
+        rollout = source / relative
+        rollout.parent.mkdir(parents=True)
+        rollout.write_text('{"type":"session_meta"}\n', encoding="utf-8")
+        database = source / "state_5.sqlite"
+        with sqlite3.connect(database) as connection:
+            connection.execute(
+                "CREATE TABLE threads (id TEXT PRIMARY KEY, rollout_path TEXT NOT NULL, archived INTEGER NOT NULL)"
+            )
+            connection.execute(
+                "INSERT INTO threads (id, rollout_path, archived) VALUES (?, ?, 0)",
+                (session_id, str(rollout)),
+            )
+
+        target = self.store.adopt("codex", "personal", source)
+
+        with sqlite3.connect(target / "state_5.sqlite") as connection:
+            stored_path = connection.execute(
+                "SELECT rollout_path FROM threads WHERE id = ?", (session_id,)
+            ).fetchone()[0]
+        self.assertEqual(stored_path, str(target / relative))
+
     def test_use_only_changes_the_pointer(self) -> None:
         self.store.create_profile("codex", "work")
         self.store.create_profile("claude", "work")
@@ -442,6 +471,116 @@ class SharedHistoryTests(TemporaryStoreTestCase):
         sync_codex_history(self.store)
 
         self.assertEqual(personal_rollout.read_text(), work_rollout.read_text())
+
+    def test_codex_sync_repairs_a_stale_existing_thread_path(self) -> None:
+        personal = self.store.create_profile("codex", "personal")
+        work = self.store.create_profile("codex", "work")
+        session_id = "01a03cc1-2ff1-72d2-902d-e9208da115e2"
+        relative = Path(
+            "sessions/2026/08/26/"
+            f"rollout-2026-08-26T08-28-08-{session_id}.jsonl"
+        )
+        work_rollout = work / relative
+        work_rollout.parent.mkdir(parents=True)
+        work_rollout.write_text("latest continuation\n", encoding="utf-8")
+        stale_rollout = self.root / ".codex" / relative
+        stale_rollout.parent.mkdir(parents=True)
+        stale_rollout.write_text("stale continuation\n", encoding="utf-8")
+        database = personal / "state_5.sqlite"
+        with sqlite3.connect(database) as connection:
+            connection.execute(
+                "CREATE TABLE threads (id TEXT PRIMARY KEY, rollout_path TEXT NOT NULL, archived INTEGER NOT NULL)"
+            )
+            connection.execute(
+                "INSERT INTO threads (id, rollout_path, archived) VALUES (?, ?, 0)",
+                (session_id, str(stale_rollout)),
+            )
+
+        sync_codex_history(self.store)
+
+        personal_rollout = personal / relative
+        self.assertEqual(personal_rollout.read_text(), work_rollout.read_text())
+        with sqlite3.connect(database) as connection:
+            stored_path = connection.execute(
+                "SELECT rollout_path FROM threads WHERE id = ?", (session_id,)
+            ).fetchone()[0]
+        self.assertEqual(stored_path, str(personal_rollout))
+
+    def test_codex_sync_updates_a_stale_paginated_history_projection(self) -> None:
+        personal = self.store.create_profile("codex", "personal")
+        work = self.store.create_profile("codex", "work")
+        session_id = "01a03cc1-2ff1-72d2-902d-e9208da115e2"
+        relative = Path(
+            "sessions/2026/08/26/"
+            f"rollout-2026-08-26T08-28-08-{session_id}.jsonl"
+        )
+        work_rollout = work / relative
+        work_rollout.parent.mkdir(parents=True)
+        work_rollout.write_text("old prefix\nnew continuation\n", encoding="utf-8")
+        personal_rollout = personal / relative
+        personal_rollout.parent.mkdir(parents=True)
+        personal_rollout.write_text("old prefix\nold continuation\n", encoding="utf-8")
+        personal_history = personal / "thread_history_1.sqlite"
+        work_history = work / "thread_history_1.sqlite"
+        for database, rollout, marker, ordinal in (
+            (personal_history, personal_rollout, "stale", 1),
+            (work_history, work_rollout, "latest", 2),
+        ):
+            with sqlite3.connect(database) as connection:
+                connection.execute(
+                    "CREATE TABLE thread_history_projection_state "
+                    "(thread_id TEXT PRIMARY KEY, next_rollout_byte_offset INTEGER NOT NULL, "
+                    "next_rollout_ordinal INTEGER NOT NULL)"
+                )
+                connection.execute(
+                    "CREATE TABLE thread_turns (thread_id TEXT NOT NULL, marker TEXT)"
+                )
+                connection.execute(
+                    "CREATE TABLE thread_items (thread_id TEXT NOT NULL, marker TEXT)"
+                )
+                connection.execute(
+                    "CREATE TABLE thread_realtime_items "
+                    "(thread_id TEXT NOT NULL, marker TEXT)"
+                )
+                connection.execute(
+                    "INSERT INTO thread_history_projection_state VALUES (?, ?, ?)",
+                    (session_id, rollout.stat().st_size, ordinal),
+                )
+                connection.execute(
+                    "INSERT INTO thread_turns VALUES (?, ?)", (session_id, marker)
+                )
+                connection.execute(
+                    "INSERT INTO thread_items VALUES (?, ?)", (session_id, marker)
+                )
+        newer = personal_rollout.stat().st_mtime_ns + 2_000_000_000
+        os.utime(work_rollout, ns=(newer, newer))
+
+        sync_codex_history(self.store)
+
+        self.assertEqual(personal_rollout.read_text(), work_rollout.read_text())
+        with sqlite3.connect(personal_history) as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT next_rollout_byte_offset FROM thread_history_projection_state "
+                    "WHERE thread_id = ?",
+                    (session_id,),
+                ).fetchone()[0],
+                work_rollout.stat().st_size,
+            )
+            self.assertEqual(
+                connection.execute(
+                    "SELECT marker FROM thread_turns WHERE thread_id = ?",
+                    (session_id,),
+                ).fetchone()[0],
+                "latest",
+            )
+            self.assertEqual(
+                connection.execute(
+                    "SELECT marker FROM thread_items WHERE thread_id = ?",
+                    (session_id,),
+                ).fetchone()[0],
+                "latest",
+            )
 
     def test_shared_history_can_be_disabled(self) -> None:
         with patch.dict(os.environ, {"AICX_CODEX_HISTORY": "isolated"}):

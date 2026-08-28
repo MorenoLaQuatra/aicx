@@ -7,7 +7,14 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .errors import AicxError
-from .store import Store, validate_tool
+from .store import (
+    CODEX_THREAD_ID_RE,
+    Store,
+    codex_thread_projection_status,
+    copy_codex_thread_projection,
+    reconcile_codex_thread_paths,
+    validate_tool,
+)
 
 
 HISTORY_AREAS: dict[str, dict[str, str]] = {
@@ -103,6 +110,7 @@ def sync_history(store: Store, tool: str) -> SyncResult:
                     imported += 1
 
     distributed = 0
+    changed_threads: dict[Path, set[str]] = {}
     for area, pattern in HISTORY_AREAS[tool].items():
         canonical_area = shared_root / area
         if not canonical_area.is_dir():
@@ -118,6 +126,20 @@ def sync_history(store: Store, tool: str) -> SyncResult:
                 if _source_wins(canonical, destination):
                     _atomic_copy(canonical, destination)
                     distributed += 1
+                    if tool == "codex":
+                        match = CODEX_THREAD_ID_RE.search(destination.name)
+                        if match is not None:
+                            changed_threads.setdefault(home, set()).add(
+                                match.group("id").lower()
+                            )
+
+    if tool == "codex":
+        for profile, home in profile_homes:
+            if profile not in active_profiles:
+                reconcile_codex_thread_paths(home)
+        _sync_codex_thread_projections(
+            profile_homes, active_profiles, shared_root, changed_threads
+        )
 
     return SyncResult(
         imported=imported,
@@ -133,6 +155,73 @@ def codex_history_is_shared() -> bool:
 
 def sync_codex_history(store: Store) -> SyncResult:
     return sync_history(store, "codex")
+
+
+def _sync_codex_thread_projections(
+    profile_homes: list[tuple[str, Path]],
+    active_profiles: set[str],
+    shared_root: Path,
+    changed_threads: dict[Path, set[str]],
+) -> None:
+    """Merge derived paginated history from a complete inactive donor profile."""
+    inactive_homes = [
+        home for profile, home in profile_homes if profile not in active_profiles
+    ]
+    if len(inactive_homes) < 2:
+        return
+    statuses = {
+        home: codex_thread_projection_status(home) for home in inactive_homes
+    }
+    canonical_rollouts: dict[str, Path] = {}
+    for area in ("sessions", "archived_sessions"):
+        area_root = shared_root / area
+        if not area_root.is_dir():
+            continue
+        for rollout in area_root.rglob("*.jsonl"):
+            if not rollout.is_file():
+                continue
+            match = CODEX_THREAD_ID_RE.search(rollout.name)
+            if match is None:
+                continue
+            thread_id = match.group("id").lower()
+            current = canonical_rollouts.get(thread_id)
+            if current is None or _source_wins(rollout, current):
+                canonical_rollouts[thread_id] = rollout
+
+    for thread_id, rollout in canonical_rollouts.items():
+        try:
+            rollout_size = rollout.stat().st_size
+        except OSError as exc:
+            raise AicxError(f"Cannot inspect shared Codex rollout {rollout}: {exc}") from exc
+        donor: tuple[Path, Path] | None = None
+        for home in inactive_homes:
+            projection = statuses[home].get(thread_id)
+            if (
+                thread_id not in changed_threads.get(home, set())
+                and projection is not None
+                and projection[1] == rollout_size
+            ):
+                donor = (home, projection[0])
+                break
+        if donor is None:
+            continue
+        donor_home, donor_database = donor
+        for home in inactive_homes:
+            if home == donor_home:
+                continue
+            projection = statuses[home].get(thread_id)
+            if (
+                thread_id not in changed_threads.get(home, set())
+                and projection is not None
+                and projection[1] == rollout_size
+            ):
+                continue
+            destination_database = (
+                projection[0] if projection is not None else home / donor_database.name
+            )
+            copy_codex_thread_projection(
+                donor_database, destination_database, thread_id
+            )
 
 
 def _source_wins(source: Path, destination: Path) -> bool:

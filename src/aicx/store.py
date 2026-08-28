@@ -4,6 +4,7 @@ import json
 import os
 import re
 import shutil
+import sqlite3
 import stat
 import tempfile
 from datetime import datetime, timezone
@@ -16,6 +17,16 @@ UTC = timezone.utc
 
 TOOLS = ("codex", "claude")
 PROFILE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+CODEX_THREAD_ID_RE = re.compile(
+    r"(?P<id>[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$",
+    re.IGNORECASE,
+)
+CODEX_THREAD_HISTORY_TABLES = (
+    "thread_items",
+    "thread_turns",
+    "thread_realtime_items",
+    "thread_history_projection_state",
+)
 
 
 def default_root() -> Path:
@@ -271,6 +282,7 @@ class Store:
             )
             if tool == "codex":
                 ensure_codex_file_auth(temp_target / "config.toml")
+                reconcile_codex_thread_paths(temp_target, stored_home=target)
             temp_target.replace(target)
         except Exception:
             shutil.rmtree(temp_parent, ignore_errors=True)
@@ -319,6 +331,191 @@ def ensure_codex_file_auth(config_path: Path) -> None:
         lines.insert(first_table, desired)
     config_path.write_text("".join(lines), encoding="utf-8")
     config_path.chmod(0o600)
+
+
+def reconcile_codex_thread_paths(home: Path, *, stored_home: Path | None = None) -> int:
+    """Point indexed Codex threads at rollouts inside their current profile home.
+
+    Codex stores absolute rollout paths in ``state_*.sqlite``. Copying a Codex
+    home during adoption, or copying a newer rollout between profile homes,
+    otherwise leaves an existing thread row pointing at the old home. If that
+    old file still exists, ``codex resume`` can load the stale copy.
+
+    ``home`` is the directory being inspected. ``stored_home`` is only different
+    while an adopted home is staged in a temporary directory before being moved
+    to its final location.
+    """
+    home = home.resolve()
+    final_home = (stored_home or home).resolve()
+    rollouts: dict[tuple[str, bool], tuple[Path, Path]] = {}
+    for area, archived in (("sessions", False), ("archived_sessions", True)):
+        area_root = home / area
+        if not area_root.is_dir():
+            continue
+        for path in area_root.rglob("*.jsonl"):
+            if not path.is_file():
+                continue
+            match = CODEX_THREAD_ID_RE.search(path.name)
+            if match is None:
+                continue
+            key = (match.group("id").lower(), archived)
+            relative = path.relative_to(home)
+            current = rollouts.get(key)
+            if current is None or _newer_file(path, current[0]):
+                rollouts[key] = (path, relative)
+
+    if not rollouts:
+        return 0
+
+    reconciled = 0
+    for database in sorted(home.glob("state_*.sqlite")):
+        try:
+            with sqlite3.connect(database, timeout=5) as connection:
+                columns = {
+                    str(row[1])
+                    for row in connection.execute("PRAGMA table_info(threads)")
+                }
+                if not {"id", "rollout_path", "archived"}.issubset(columns):
+                    continue
+                updates: list[tuple[str, str]] = []
+                for thread_id, archived, rollout_path in connection.execute(
+                    "SELECT id, archived, rollout_path FROM threads"
+                ):
+                    normalized_id = str(thread_id).lower()
+                    key = (normalized_id, bool(archived))
+                    candidate = rollouts.get(key)
+                    if candidate is None:
+                        candidate = rollouts.get((normalized_id, not bool(archived)))
+                    if candidate is None:
+                        continue
+                    desired = str(final_home / candidate[1])
+                    if str(rollout_path) != desired:
+                        updates.append((desired, str(thread_id)))
+                if updates:
+                    connection.executemany(
+                        "UPDATE threads SET rollout_path = ? WHERE id = ?",
+                        updates,
+                    )
+                    reconciled += len(updates)
+        except sqlite3.Error as exc:
+            raise AicxError(
+                f"Cannot reconcile Codex thread paths in {database}: {exc}"
+            ) from exc
+    return reconciled
+
+
+def codex_thread_projection_status(
+    home: Path,
+) -> dict[str, tuple[Path, int, int]]:
+    """Return thread ID -> (database, byte offset, ordinal) for Codex history."""
+    status: dict[str, tuple[Path, int, int]] = {}
+    for database in sorted(home.glob("thread_history_*.sqlite")):
+        try:
+            with sqlite3.connect(database, timeout=5) as connection:
+                tables = {
+                    str(row[0])
+                    for row in connection.execute(
+                        "SELECT name FROM sqlite_master WHERE type = 'table'"
+                    )
+                }
+                if "thread_history_projection_state" not in tables:
+                    continue
+                for thread_id, byte_offset, ordinal in connection.execute(
+                    "SELECT thread_id, next_rollout_byte_offset, next_rollout_ordinal "
+                    "FROM thread_history_projection_state"
+                ):
+                    status[str(thread_id).lower()] = (
+                        database,
+                        int(byte_offset),
+                        int(ordinal),
+                    )
+        except sqlite3.Error as exc:
+            raise AicxError(
+                f"Cannot inspect Codex thread history in {database}: {exc}"
+            ) from exc
+    return status
+
+
+def copy_codex_thread_projection(
+    source_database: Path, destination_database: Path, thread_id: str
+) -> int:
+    """Copy one thread's derived paginated-history rows between profile DBs."""
+    destination_database.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    try:
+        with sqlite3.connect(source_database, timeout=5) as source:
+            if not destination_database.exists():
+                with sqlite3.connect(destination_database, timeout=5) as destination:
+                    source.backup(destination)
+                return 1
+
+            with sqlite3.connect(destination_database, timeout=5) as destination:
+                table_columns: dict[str, list[str]] = {}
+                for table in CODEX_THREAD_HISTORY_TABLES:
+                    source_columns = [
+                        str(row[1])
+                        for row in source.execute(f"PRAGMA table_info({table})")
+                    ]
+                    destination_columns = [
+                        str(row[1])
+                        for row in destination.execute(f"PRAGMA table_info({table})")
+                    ]
+                    if not source_columns or source_columns != destination_columns:
+                        raise AicxError(
+                            "Codex thread-history schemas differ between profiles "
+                            f"for table {table}."
+                        )
+                    table_columns[table] = source_columns
+
+                copied = 0
+                normalized_id = thread_id.lower()
+                rows_by_table: dict[str, list[tuple[Any, ...]]] = {}
+                for table, columns in table_columns.items():
+                    column_list = ", ".join(columns)
+                    rows_by_table[table] = list(
+                        source.execute(
+                            f"SELECT {column_list} FROM {table} "
+                            "WHERE lower(thread_id) = ?",
+                            (normalized_id,),
+                        )
+                    )
+
+                for table in CODEX_THREAD_HISTORY_TABLES:
+                    destination.execute(
+                        f"DELETE FROM {table} WHERE lower(thread_id) = ?",
+                        (normalized_id,),
+                    )
+                for table, rows in rows_by_table.items():
+                    if not rows:
+                        continue
+                    columns = table_columns[table]
+                    placeholders = ", ".join("?" for _ in columns)
+                    column_list = ", ".join(columns)
+                    destination.executemany(
+                        f"INSERT INTO {table} ({column_list}) VALUES ({placeholders})",
+                        rows,
+                    )
+                    copied += len(rows)
+                return copied
+    except sqlite3.Error as exc:
+        raise AicxError(
+            "Cannot synchronize Codex thread history from "
+            f"{source_database} to {destination_database}: {exc}"
+        ) from exc
+
+
+def _newer_file(candidate: Path, current: Path) -> bool:
+    """Return whether candidate is the better local copy for a duplicate ID."""
+    try:
+        candidate_stat = candidate.stat()
+        current_stat = current.stat()
+    except OSError as exc:
+        raise AicxError(
+            f"Cannot inspect Codex rollout while reconciling paths: {exc}"
+        ) from exc
+    return (candidate_stat.st_mtime_ns, candidate_stat.st_size) > (
+        current_stat.st_mtime_ns,
+        current_stat.st_size,
+    )
 
 
 def _ignore_special_files(directory: str, names: list[str]) -> list[str]:

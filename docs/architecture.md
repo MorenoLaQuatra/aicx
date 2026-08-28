@@ -37,8 +37,11 @@ merges the newest persisted files into every profile before launch and after
 exit. Codex shares JSONL rollouts. Claude shares project transcripts and their
 supporting tool-result, project-memory, and checkpoint files. Both providers
 discover copied conversations through their normal home directories. SQLite
-databases, credential files, configuration, logs, plugins, caches, and IPC
-endpoints are never synchronized.
+authentication and runtime databases are never copied between profiles. After
+copying Codex rollouts, aicx reconciles the absolute `rollout_path` values in
+each profile's own thread index and merges only the matching rows from Codex's
+derived paginated-history cache. Credential files, configuration, logs, plugins,
+unrelated caches, and IPC endpoints are never synchronized.
 
 This is sequential handoff, not collaborative multi-writer editing. The same
 session must not be active under two account profiles simultaneously. Set
