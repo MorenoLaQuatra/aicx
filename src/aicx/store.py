@@ -131,6 +131,21 @@ class Store:
             raise AicxError(f"Invalid aicx state file: {self.state_path}")
         return data
 
+    def get_preference(self, key: str) -> Any:
+        """Return a stored CLI preference, or None when it was never set."""
+        return self.load_state().get(key)
+
+    def set_preference(self, key: str, value: Any) -> None:
+        """Persist (or, with value=None, clear) a CLI preference in state.json."""
+        state = self.load_state()
+        state["schema"] = 1
+        if value is None:
+            state.pop(key, None)
+        else:
+            state[key] = value
+        self.ensure()
+        self._write_json(self.state_path, state)
+
     def set_active(self, tool: str, profile: str) -> None:
         validate_tool(tool)
         validate_profile(profile)

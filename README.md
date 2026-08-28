@@ -107,6 +107,17 @@ aicx balance --watch --interval 15
 The balance table shows usage, remaining percentage, reset time, and the time
 left until reset.
 
+Pick the columns you care about; the choice is saved and reused on the next run:
+
+```bash
+aicx balance --columns tool,profile,window,usage,reset-in
+aicx balance                       # same columns as last time
+aicx balance --reset-columns       # forget the choice, show every column
+```
+
+Column names: `tool`, `profile`, `active`, `account`, `window`, `usage`,
+`left`, `reset-in`, `reset`, `source`.
+
 ## Conversation history
 
 `aicx` synchronizes saved history before a provider starts and after it exits.

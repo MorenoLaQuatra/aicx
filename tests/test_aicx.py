@@ -13,6 +13,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from aicx.cli import (
+    BALANCE_COLUMNS_PREFERENCE,
     build_parser,
     command_balance,
     command_tool,
@@ -22,6 +23,7 @@ from aicx.cli import (
     format_table,
     format_window_minutes,
     main,
+    parse_balance_columns,
     usage_bar,
 )
 from aicx.codex_rpc import CodexAppServer
@@ -162,6 +164,59 @@ class BalancePresentationTests(TemporaryStoreTestCase):
         self.assertEqual(result, 0)
         self.assertEqual(balance.call_count, 2)
         self.assertIn("refreshing every 7s", output.getvalue())
+
+    def _run_balance(self, **overrides: object) -> str:
+        args = argparse.Namespace(
+            tool="codex",
+            profile=None,
+            as_json=False,
+            watch=False,
+            interval=60,
+            columns=None,
+            reset_columns=False,
+        )
+        for key, value in overrides.items():
+            setattr(args, key, value)
+        codex_data = {
+            "account": {"email": "p@example.com"},
+            "limits": [
+                {"primary": {"windowDurationMins": 300, "usedPercent": 40, "resetsAt": 1_800_000_000}}
+            ],
+        }
+        output = StringIO()
+        configure_color("never")
+        with patch("aicx.cli.codex_balance", return_value=codex_data), redirect_stdout(output):
+            self.assertEqual(command_balance(self.store, args), 0)
+        return output.getvalue()
+
+    def test_columns_choice_is_applied_and_remembered(self) -> None:
+        self.store.create_profile("codex", "personal")
+
+        chosen = self._run_balance(columns="tool,profile,window,usage,reset-in")
+        self.assertIn("RESET IN", chosen)
+        self.assertNotIn("ACCOUNT", chosen)
+        self.assertNotIn("SOURCE", chosen)
+        self.assertEqual(
+            self.store.get_preference(BALANCE_COLUMNS_PREFERENCE),
+            ["tool", "profile", "window", "usage", "reset-in"],
+        )
+
+        remembered = self._run_balance()
+        self.assertNotIn("ACCOUNT", remembered)
+        self.assertIn("RESET IN", remembered)
+
+        full = self._run_balance(reset_columns=True)
+        self.assertIn("ACCOUNT", full)
+        self.assertIn("SOURCE", full)
+        self.assertIsNone(self.store.get_preference(BALANCE_COLUMNS_PREFERENCE))
+
+    def test_parse_balance_columns_normalizes_and_rejects_unknown(self) -> None:
+        self.assertEqual(
+            parse_balance_columns("USAGE, Reset_In , tool"),
+            ["tool", "usage", "reset-in"],
+        )
+        with self.assertRaisesRegex(AicxError, "Unknown balance column"):
+            parse_balance_columns("tool,bogus")
 
 
 class AccountPresentationTests(TemporaryStoreTestCase):

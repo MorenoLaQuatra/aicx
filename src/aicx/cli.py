@@ -44,6 +44,40 @@ UTC = timezone.utc
 
 _COLOR_ENABLED = False
 
+# Ordered catalogue of `aicx balance` table columns: (key, header).
+BALANCE_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("tool", "TOOL"),
+    ("profile", "PROFILE"),
+    ("active", "ACTIVE"),
+    ("account", "ACCOUNT"),
+    ("window", "WINDOW"),
+    ("usage", "USAGE"),
+    ("left", "LEFT"),
+    ("reset-in", "RESET IN"),
+    ("reset", "RESET (LOCAL)"),
+    ("source", "SOURCE"),
+)
+BALANCE_COLUMN_KEYS = tuple(key for key, _ in BALANCE_COLUMNS)
+BALANCE_COLUMNS_PREFERENCE = "balance_columns"
+
+
+def parse_balance_columns(value: str) -> list[str]:
+    """Normalize and validate a comma-separated column list, keeping catalogue order."""
+    requested: set[str] = set()
+    for raw in value.split(","):
+        token = raw.strip().lower().replace("_", "-").replace(" ", "-")
+        if not token:
+            continue
+        if token not in BALANCE_COLUMN_KEYS:
+            raise AicxError(
+                f"Unknown balance column: '{raw.strip()}'. "
+                f"Choose from: {', '.join(BALANCE_COLUMN_KEYS)}"
+            )
+        requested.add(token)
+    if not requested:
+        raise AicxError("At least one balance column is required.")
+    return [key for key in BALANCE_COLUMN_KEYS if key in requested]
+
 
 @dataclass(frozen=True)
 class StyledCell:
@@ -154,6 +188,19 @@ Run `aicx COMMAND --help` for command-specific options.
         default=60,
         metavar="SECONDS",
         help="refresh interval for --watch (default: 60)",
+    )
+    balance_parser.add_argument(
+        "--columns",
+        metavar="COL[,COL...]",
+        help=(
+            "table columns to show, saved and reused next time. Choose from: "
+            + ", ".join(key for key, _ in BALANCE_COLUMNS)
+        ),
+    )
+    balance_parser.add_argument(
+        "--reset-columns",
+        action="store_true",
+        help="forget the saved --columns choice and show every column",
     )
 
     sessions_parser = subparsers.add_parser("sessions")
@@ -582,33 +629,63 @@ def balance_records(store: Store, args: argparse.Namespace) -> list[dict[str, An
     return records
 
 
-def render_balance(records: list[dict[str, Any]], *, as_json: bool) -> str:
+def _balance_cell(key: str, row: dict[str, Any]) -> Any:
+    if key == "tool":
+        return tool_cell(row["tool"])
+    if key == "profile":
+        return row["profile"]
+    if key == "active":
+        return styled("●", "32") if row["active"] else ""
+    if key == "account":
+        return row["account"]
+    if key == "window":
+        return row["window"]
+    if key == "usage":
+        return usage_bar(row["used"])
+    if key == "left":
+        return percent_cell(row["left"])
+    if key == "reset-in":
+        return row["resets_in"]
+    if key == "reset":
+        return row["resets"]
+    return styled(row["freshness"], "32" if row["freshness"] == "live" else "36")
+
+
+def render_balance(
+    records: list[dict[str, Any]],
+    *,
+    as_json: bool,
+    columns: Sequence[str] | None = None,
+) -> str:
     if as_json:
         return json.dumps(records, indent=2)
+    keys = list(columns) if columns else list(BALANCE_COLUMN_KEYS)
+    headers = tuple(header for key, header in BALANCE_COLUMNS if key in keys)
     return format_table(
+        headers,
         (
-            "TOOL", "PROFILE", "ACTIVE", "ACCOUNT", "WINDOW", "USAGE",
-            "LEFT", "RESET IN", "RESET (LOCAL)", "SOURCE",
-        ),
-        (
-            (
-                tool_cell(row["tool"]),
-                row["profile"],
-                styled("●", "32") if row["active"] else "",
-                row["account"],
-                row["window"],
-                usage_bar(row["used"]),
-                percent_cell(row["left"]),
-                row["resets_in"],
-                row["resets"],
-                styled(
-                    row["freshness"],
-                    "32" if row["freshness"] == "live" else "36",
-                ),
-            )
+            tuple(_balance_cell(key, row) for key in BALANCE_COLUMN_KEYS if key in keys)
             for row in records
         ),
     )
+
+
+def resolve_balance_columns(store: Store, args: argparse.Namespace) -> list[str] | None:
+    """Apply and persist the --columns / --reset-columns choice, returning the active set."""
+    if getattr(args, "reset_columns", False):
+        store.set_preference(BALANCE_COLUMNS_PREFERENCE, None)
+        if not getattr(args, "columns", None):
+            return None
+    if getattr(args, "columns", None):
+        columns = parse_balance_columns(args.columns)
+        store.set_preference(BALANCE_COLUMNS_PREFERENCE, columns)
+        return columns
+    saved = store.get_preference(BALANCE_COLUMNS_PREFERENCE)
+    if isinstance(saved, list):
+        columns = [key for key in BALANCE_COLUMN_KEYS if key in set(saved)]
+        if columns:
+            return columns
+    return None
 
 
 def command_balance(store: Store, args: argparse.Namespace) -> int:
@@ -616,6 +693,7 @@ def command_balance(store: Store, args: argparse.Namespace) -> int:
     interval = int(getattr(args, "interval", 60))
     if watch and args.as_json:
         raise AicxError("--json cannot be combined with --watch")
+    columns = resolve_balance_columns(store, args)
     first = True
     while True:
         if watch and sys.stdout.isatty():
@@ -625,7 +703,11 @@ def command_balance(store: Store, args: argparse.Namespace) -> int:
         if watch:
             updated = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S")
             print(f"Updated {updated} - refreshing every {interval}s - Ctrl-C to stop\n")
-        print(render_balance(balance_records(store, args), as_json=args.as_json))
+        print(
+            render_balance(
+                balance_records(store, args), as_json=args.as_json, columns=columns
+            )
+        )
         if not watch:
             return 0
         first = False

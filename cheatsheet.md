@@ -57,12 +57,17 @@ aicx balance --watch
 # Custom refresh interval
 aicx balance --watch --interval 15
 
+# Choose columns (remembered next time); reset to show all
+aicx balance --columns tool,profile,window,usage,reset-in
+aicx balance --reset-columns
+
 # Machine-readable output
 aicx accounts --json
 aicx balance --json
 ```
 
 `--continuous` is an alias for `--watch`. Press `Ctrl+C` to stop watch mode.
+`--json` always prints every field regardless of `--columns`.
 
 ## History and sessions
 
