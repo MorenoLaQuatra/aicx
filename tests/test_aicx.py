@@ -445,7 +445,7 @@ class ClaudeTests(TemporaryStoreTestCase):
 
 
 class ProcessTests(TemporaryStoreTestCase):
-    def test_registry_recognizes_the_same_linux_process(self) -> None:
+    def test_registry_recognizes_the_currently_running_process(self) -> None:
         registry = ProcessRegistry(self.store)
         registry.add(os.getpid(), "codex", "work", ["codex"])
 
@@ -453,6 +453,15 @@ class ProcessTests(TemporaryStoreTestCase):
 
         self.assertEqual([record["pid"] for record in records], [os.getpid()])
         registry.remove(os.getpid())
+
+    def test_registry_drops_records_whose_pid_is_no_longer_alive(self) -> None:
+        from aicx.processes import process_start_signature
+
+        registry = ProcessRegistry(self.store)
+        self.assertIsNotNone(process_start_signature(os.getpid()))
+
+        registry.add(999_999_999, "codex", "work", ["codex"])
+        self.assertEqual(registry.list(tool="codex"), [])
 
 
 class RpcTests(unittest.TestCase):

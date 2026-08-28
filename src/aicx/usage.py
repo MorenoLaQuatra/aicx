@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -11,6 +11,8 @@ from .codex_rpc import CodexAppServer
 from .errors import AicxError, RpcError
 from .providers import find_binary, profile_env
 from .store import Store
+
+UTC = timezone.utc
 
 
 def codex_account(store: Store, profile: str) -> dict[str, Any] | None:

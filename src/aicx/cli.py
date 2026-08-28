@@ -9,7 +9,7 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
@@ -40,6 +40,7 @@ from .usage import (
     read_claude_balance,
 )
 
+UTC = timezone.utc
 
 _COLOR_ENABLED = False
 
@@ -775,8 +776,8 @@ def command_shell_init(args: argparse.Namespace) -> int:
 
 def command_doctor(store: Store) -> int:
     rows: list[tuple[str, str, str]] = []
-    linux = platform.system() == "Linux"
-    rows.append(("platform", platform.platform(), "ok" if linux else "unsupported in 0.3"))
+    supported = platform.system() in {"Linux", "Darwin"}
+    rows.append(("platform", platform.platform(), "ok" if supported else "unsupported"))
     for tool in TOOLS:
         binary = shutil.which(tool)
         version = "not found"
@@ -803,7 +804,7 @@ def command_doctor(store: Store) -> int:
     )
     rows.append(("aicx home", str(store.root), "ok"))
     print(format_table(("COMPONENT", "DETAIL", "STATUS"), rows))
-    return 0 if linux else 1
+    return 0 if supported else 1
 
 
 def dispatch(store: Store, args: argparse.Namespace) -> int:
@@ -852,9 +853,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(raw_arguments)
     configure_color(args.color)
     try:
-        if platform.system() != "Linux" and args.command not in {"doctor", "--version"}:
+        if platform.system() not in {"Linux", "Darwin"} and args.command not in {"doctor", "--version"}:
             raise AicxError(
-                f"aicx {__version__} supports Linux only; macOS support is planned next."
+                f"aicx {__version__} supports Linux and macOS only."
             )
         return dispatch(Store(), args)
     except (AicxError, OSError) as exc:

@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from .codex_rpc import CodexAppServer
 from .providers import find_binary, profile_env
 from .store import Store
+
+UTC = timezone.utc
 
 
 def codex_sessions(store: Store, profile: str, limit: int = 100) -> list[dict[str, Any]]:

@@ -20,8 +20,9 @@ name selected in state.json
 The preferred `aicx TOOL @PROFILE` form selects and launches in one operation.
 Selection writes only `state.json`; launching synchronizes persisted conversation
 files, constructs a provider-specific environment, starts the official
-executable, and records the PID plus its Linux `/proc` start ticks. Login is a
-separate one-time command.
+executable, and records the PID plus a process start-time signature used to
+detect PID reuse (`/proc/<pid>/stat` start ticks on Linux, `ps -o lstart` on
+macOS). Login is a separate one-time command.
 
 ## Shared history
 
@@ -68,13 +69,19 @@ single operating-system read.
 The status-line installer will not compose with or overwrite an existing hook.
 That conservative policy avoids executing or rewriting arbitrary shell commands.
 
-## macOS plan
+## macOS support
 
-Most code is already portable. The Linux guard makes the unsupported boundary
-explicit while these areas are tested on macOS:
+`aicx` runs on Linux and macOS. The platform guard now only rejects other
+systems (for example Windows).
 
-1. Replace `/proc` PID identity with a portable process-start-time adapter.
-2. Verify profile-local provider credential behavior when Keychain is available.
-3. Add a macOS CI job and remove the platform guard only after end-to-end tests.
+- PID identity uses `/proc/<pid>/stat` on Linux and falls back to `ps -o lstart`
+  on macOS and other BSD-flavored systems.
+- Codex credentials stay profile-local because `config.toml` pins
+  `cli_auth_credentials_store = "file"`, so the macOS Keychain is not consulted.
+- Claude Code writes `.credentials.json` inside `CLAUDE_CONFIG_DIR`. On a macOS
+  machine whose login Keychain also holds a legacy `Claude Code-credentials`
+  item, confirm the provider reads the profile file before relying on multiple
+  Claude accounts; `security delete-generic-password -s "Claude Code-credentials"`
+  removes the stale item.
 
-The on-disk profile layout and CLI syntax should not need to change.
+The on-disk profile layout and CLI syntax are identical on both platforms.

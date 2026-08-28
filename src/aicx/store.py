@@ -6,11 +6,13 @@ import re
 import shutil
 import stat
 import tempfile
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from .errors import AicxError
+
+UTC = timezone.utc
 
 TOOLS = ("codex", "claude")
 PROFILE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")

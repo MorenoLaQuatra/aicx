@@ -4,6 +4,7 @@ import json
 import os
 import signal
 import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Any, Sequence
@@ -12,13 +13,45 @@ from .errors import AicxError
 from .store import Store
 
 
-def linux_start_ticks(pid: int) -> int | None:
+def _proc_stat_start_ticks(pid: int) -> str | None:
+    """Linux fast path: kernel start time in clock ticks from /proc/<pid>/stat."""
     try:
         content = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
         fields_after_name = content.rsplit(")", 1)[1].split()
-        return int(fields_after_name[19])
+        return str(int(fields_after_name[19]))
     except (OSError, ValueError, IndexError):
         return None
+
+
+def _ps_start_time(pid: int) -> str | None:
+    """Portable fallback: absolute process start time reported by ps (BSD/macOS)."""
+    try:
+        result = subprocess.run(
+            ["ps", "-o", "lstart=", "-p", str(pid)],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    line = result.stdout.strip()
+    return line or None
+
+
+def process_start_signature(pid: int) -> str | None:
+    """Return a stable token for a running PID that changes if the PID is reused.
+
+    Used to detect stale registry records after a PID has been recycled. Returns
+    None when the process is gone or cannot be inspected.
+    """
+    if sys.platform.startswith("linux"):
+        ticks = _proc_stat_start_ticks(pid)
+        if ticks is not None:
+            return ticks
+    return _ps_start_time(pid)
 
 
 class ProcessRegistry:
@@ -33,7 +66,7 @@ class ProcessRegistry:
             "profile": profile,
             "command": list(command),
             "started_at": time.time(),
-            "start_ticks": linux_start_ticks(pid),
+            "start_signature": process_start_signature(pid),
         }
         self.store._write_json(self.store.run_dir / f"{pid}.json", record)
 
@@ -51,10 +84,12 @@ class ProcessRegistry:
             except (OSError, ValueError, KeyError, json.JSONDecodeError):
                 path.unlink(missing_ok=True)
                 continue
-            current_ticks = linux_start_ticks(pid)
-            expected_ticks = record.get("start_ticks")
-            if current_ticks is None or (
-                expected_ticks is not None and current_ticks != expected_ticks
+            current_signature = process_start_signature(pid)
+            expected_signature = record.get("start_signature", record.get("start_ticks"))
+            if expected_signature is not None:
+                expected_signature = str(expected_signature)
+            if current_signature is None or (
+                expected_signature is not None and current_signature != expected_signature
             ):
                 path.unlink(missing_ok=True)
                 continue

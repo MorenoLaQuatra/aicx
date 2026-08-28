@@ -16,7 +16,8 @@ continue with another.
 
 ## Install
 
-You need Linux, Python 3.11 or newer, and the official Codex or Claude Code CLI.
+You need Linux or macOS, Python 3.9 or newer, and the official Codex or Claude
+Code CLI.
 
 ```bash
 pip install aicx
@@ -132,7 +133,8 @@ the conversation store.
 - Test the complete workflow with multiple real Claude Code accounts. Multiple
   Codex accounts are tested.
 - Add and test VS Code account integration.
-- Add macOS support.
+- On macOS, confirm profile-local Claude credentials when the login Keychain
+  holds a `Claude Code-credentials` item (Codex is pinned to file storage).
 
 ## More documentation
 
