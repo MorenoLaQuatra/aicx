@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Iterable, Sequence
 
 from . import __version__
+from .codex_auth import codex_auth_diagnostics
 from .errors import AicxError
 from .history import history_is_shared, shared_history_count, sync_history
 from .processes import ProcessRegistry, run_tracked
@@ -118,12 +119,14 @@ DAILY USE (history synchronization is automatic)
     aicx balance                 show usage for every account
 
 SETUP ONCE
-    aicx login codex work --device-auth
-    aicx login codex personal --device-auth
+    aicx login codex work
+    aicx login codex personal
     aicx login claude work --sso
 
-  To preserve a login made before installing aicx:
+  To import existing Codex settings/history and start a fresh profile login:
     aicx adopt codex personal
+
+  Browser OAuth is the Codex default. Add --device-auth on headless machines.
 
 The @profile form selects and launches in one command. Without it, `aicx codex`
 or `aicx claude` uses the last selected profile. Login is never repeated.
@@ -145,17 +148,37 @@ Run `aicx COMMAND --help` for command-specific options.
     )
     subparsers = parser.add_subparsers(dest="command", required=True, metavar="COMMAND")
 
-    login_parser = subparsers.add_parser("login", help="Log in once inside a named profile")
+    login_parser = subparsers.add_parser(
+        "login",
+        help="Log in once inside a named profile",
+        description=(
+            "Log in inside a profile-local provider home. Codex uses browser "
+            "OAuth by default; --device-auth is optional."
+        ),
+    )
     login_parser.add_argument("tool", choices=TOOLS)
     login_parser.add_argument("profile")
-    login_parser.add_argument("--force", action="store_true", help="Run login even if already authenticated")
-    login_parser.add_argument("--device-auth", action="store_true", help="Use Codex device-code login")
+    login_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Safely replace local credentials and run login again",
+    )
+    login_parser.add_argument(
+        "--device-auth",
+        action="store_true",
+        help="Use Codex device-code login instead of browser OAuth",
+    )
     login_parser.add_argument("--console", action="store_true", help="Use Claude Console authentication")
     login_parser.add_argument("--sso", action="store_true", help="Force Claude SSO authentication")
     login_parser.add_argument("--email", help="Pre-fill the Claude login email")
 
     adopt_parser = subparsers.add_parser(
-        "adopt", help="Copy an existing tool home, including auth and history, into a profile"
+        "adopt",
+        help="Import an existing tool home; Codex credentials are never copied",
+        description=(
+            "Import an existing tool home. For Codex, OAuth credentials are "
+            "excluded and a fresh browser login starts after safe state is imported."
+        ),
     )
     adopt_parser.add_argument("tool", choices=TOOLS)
     adopt_parser.add_argument("profile")
@@ -395,19 +418,28 @@ def command_login(store: Store, args: argparse.Namespace) -> int:
         extra.extend(("--email", args.email))
     # Fail before creating a profile if the provider itself is not installed.
     find_binary(args.tool)
-    status_before: dict[str, Any] | None = None
     store.create_profile(args.tool, args.profile)
-    try:
-        status_before = native_status(store, args.tool, args.profile)
-    except AicxError:
-        status_before = None
-    if status_before and status_before["logged_in"] and not args.force:
-        store.set_active(args.tool, args.profile)
-        sync_history(store, args.tool)
-        print(f"{args.tool}/{args.profile} is already logged in; selected it without re-authenticating.")
-        return 0
-    # Status was checked above so the provider wrapper must not check it a second time.
-    code = login(store, args.tool, args.profile, force=True, extra_args=extra)
+    if not args.force:
+        status_before: dict[str, Any] | None = None
+        try:
+            status_before = native_status(store, args.tool, args.profile)
+        except AicxError:
+            status_before = None
+        if status_before and status_before["logged_in"]:
+            store.set_active(args.tool, args.profile)
+            sync_history(store, args.tool)
+            print(
+                f"{args.tool}/{args.profile} is already logged in; "
+                "selected it without re-authenticating."
+            )
+            return 0
+    code = login(
+        store,
+        args.tool,
+        args.profile,
+        force=args.force,
+        extra_args=extra,
+    )
     if code == 0:
         if args.tool == "claude":
             hook_status = install_claude_usage_hook(store.tool_home("claude", args.profile))
@@ -420,12 +452,28 @@ def command_login(store: Store, args: argparse.Namespace) -> int:
 
 def command_adopt(store: Store, args: argparse.Namespace) -> int:
     source = args.source or default_home(args.tool)
+    if args.tool == "codex":
+        # Fail before importing anything if the fresh login cannot be started.
+        find_binary("codex")
     target = store.adopt(args.tool, args.profile, source)
     if args.tool == "claude":
         hook_status = install_claude_usage_hook(target)
         print(f"Claude usage collector: {hook_status}")
-    store.set_active(args.tool, args.profile)
     sync_history(store, args.tool)
+    if args.tool == "codex":
+        print(f"Imported safe Codex state from {source} into codex/{args.profile}.")
+        print("Codex OAuth credentials were intentionally not copied.")
+        print("Starting an independent browser login for this profile...")
+        code = login(store, "codex", args.profile, force=True)
+        if code != 0:
+            print("Codex login did not complete. Finish setup with:")
+            print(f"  aicx login codex {args.profile}")
+            return code
+        store.set_active("codex", args.profile)
+        sync_history(store, "codex")
+        print(f"Logged in and selected: codex/{args.profile}")
+        return 0
+    store.set_active(args.tool, args.profile)
     print(f"Adopted {source} as {args.tool}/{args.profile}")
     print("Authentication and conversation history were copied together; the source was not changed.")
     return 0
@@ -939,8 +987,58 @@ def command_doctor(store: Store) -> int:
             "warning" if credential_overrides else "ok",
         )
     )
+    codex_homes = [("default Codex home", default_home("codex"))]
+    codex_homes.extend(
+        (f"codex/{profile}", store.tool_home("codex", profile))
+        for _, profile in store.list_profiles("codex")
+    )
+    auth_diagnostics = codex_auth_diagnostics(codex_homes)
+    if auth_diagnostics.duplicate_groups:
+        rows.append(
+            (
+                "codex auth",
+                "duplicated OAuth credentials detected",
+                "warning",
+            )
+        )
+    elif auth_diagnostics.uninspectable:
+        rows.append(
+            (
+                "codex auth",
+                f"could not inspect {len(auth_diagnostics.uninspectable)} auth file(s)",
+                "warning",
+            )
+        )
+    else:
+        rows.append(("codex auth", "no duplicated OAuth credentials", "ok"))
     rows.append(("aicx home", str(store.root), "ok"))
     print(format_table(("COMPONENT", "DETAIL", "STATUS"), rows))
+    if auth_diagnostics.duplicate_groups:
+        print("\nWARNING: duplicated Codex OAuth credentials detected.")
+        print("\nThe following Codex homes appear to share the same OAuth session:")
+        affected_profiles: list[str] = []
+        for group in auth_diagnostics.duplicate_groups:
+            print("")
+            for label in group:
+                print(f"  {label}")
+                if label.startswith("codex/"):
+                    affected_profiles.append(label.removeprefix("codex/"))
+        print(
+            "\nCopied OAuth refresh tokens are not safe across independent "
+            "CODEX_HOME values."
+        )
+        print("\nReauthenticate each aicx profile independently:")
+        for profile in dict.fromkeys(affected_profiles):
+            print(f"  aicx login codex {profile} --force")
+        print(
+            "\nThese repair commands remove only the selected profile's local "
+            "Codex auth before login; they do not run codex logout."
+        )
+    if auth_diagnostics.uninspectable:
+        print(
+            "\nWARNING: some Codex auth files could not be inspected; "
+            "doctor skipped them without reading or displaying credential values."
+        )
     return 0 if supported else 1
 
 

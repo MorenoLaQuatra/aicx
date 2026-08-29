@@ -11,13 +11,16 @@ from contextlib import redirect_stdout
 from datetime import datetime
 from io import StringIO
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from aicx.cli import (
     BALANCE_COLUMNS_PREFERENCE,
     build_parser,
     command_balance,
+    command_doctor,
     command_forget,
+    command_login,
     command_rename,
     command_tool,
     configure_color,
@@ -30,6 +33,11 @@ from aicx.cli import (
     usage_bar,
 )
 from aicx.codex_rpc import CodexAppServer
+from aicx.codex_auth import (
+    codex_auth_diagnostics,
+    codex_oauth_fingerprint,
+    inspect_codex_auth_file,
+)
 from aicx.errors import AicxError
 from aicx.history import (
     codex_history_is_shared,
@@ -264,20 +272,53 @@ class StoreTests(TemporaryStoreTestCase):
         self.assertEqual(text.count("cli_auth_credentials_store"), 1)
         self.assertLess(text.index("cli_auth_credentials_store"), text.index("[features]"))
 
-    def test_adopt_copies_credentials_and_history_without_changing_source(self) -> None:
+    def test_codex_adopt_excludes_credentials_and_keeps_safe_state(self) -> None:
         source = self.root / "old-codex"
         (source / "sessions" / "2026").mkdir(parents=True)
-        (source / "auth.json").write_text('{"token":"secret"}\n', encoding="utf-8")
+        (source / "auth.json").write_text(
+            '{"tokens":{"refresh_token":"fake-source-refresh"}}\n',
+            encoding="utf-8",
+        )
+        (source / ".credentials.json").write_text(
+            '{"mcp":"fake-source-oauth"}\n', encoding="utf-8"
+        )
+        secrets = source / "secrets"
+        secrets.mkdir()
+        (secrets / "codex_auth.age").write_text(
+            "fake-encrypted-cli-auth\n", encoding="utf-8"
+        )
+        (secrets / "mcp_oauth.age").write_text(
+            "fake-encrypted-mcp-auth\n", encoding="utf-8"
+        )
+        (source / "config.toml").write_text(
+            'model = "gpt-test"\n[features]\nfoo = true\n', encoding="utf-8"
+        )
         session = source / "sessions" / "2026" / "thread.jsonl"
         session.write_text('{"message":"hello"}\n', encoding="utf-8")
         os.mkfifo(source / "transient.pipe")
 
         target = self.store.adopt("codex", "personal", source)
 
-        self.assertEqual((target / "auth.json").read_text(), '{"token":"secret"}\n')
+        self.assertFalse((target / "auth.json").exists())
+        self.assertFalse((target / ".credentials.json").exists())
+        self.assertFalse((target / "secrets").exists())
         self.assertEqual((target / "sessions" / "2026" / "thread.jsonl").read_text(), session.read_text())
+        config = target / "config.toml"
+        self.assertIn('model = "gpt-test"', config.read_text(encoding="utf-8"))
+        self.assertIn(
+            'cli_auth_credentials_store = "file"',
+            config.read_text(encoding="utf-8"),
+        )
+        self.assertLess(
+            config.read_text(encoding="utf-8").index("cli_auth_credentials_store"),
+            config.read_text(encoding="utf-8").index("[features]"),
+        )
+        self.assertEqual(stat.S_IMODE(config.stat().st_mode), 0o600)
         self.assertTrue(source.exists())
         self.assertTrue(session.exists())
+        self.assertTrue((source / "auth.json").exists())
+        self.assertTrue((source / ".credentials.json").exists())
+        self.assertTrue((source / "secrets" / "codex_auth.age").exists())
         self.assertFalse((target / "transient.pipe").exists())
 
     def test_adopt_rebases_codex_thread_paths_to_the_profile_home(self) -> None:
@@ -637,6 +678,271 @@ class SharedHistoryTests(TemporaryStoreTestCase):
 
         self.assertFalse((work / "sessions" / "2026" / "active.jsonl").exists())
         self.assertEqual(result.skipped_active_profiles, 1)
+
+
+class CodexAuthLifecycleTests(TemporaryStoreTestCase):
+    @staticmethod
+    def login_args(*, force: bool = False, device_auth: bool = False) -> argparse.Namespace:
+        return argparse.Namespace(
+            tool="codex",
+            profile="personal",
+            force=force,
+            device_auth=device_auth,
+            console=False,
+            sso=False,
+            email=None,
+        )
+
+    def test_standard_login_uses_profile_home_and_browser_oauth_default(self) -> None:
+        with patch("aicx.cli.find_binary", return_value="/bin/codex"), patch(
+            "aicx.cli.native_status", return_value={"logged_in": False}
+        ), patch("aicx.providers.find_binary", return_value="/bin/codex"), patch(
+            "aicx.providers.native_status", return_value={"logged_in": False}
+        ), patch("aicx.providers.subprocess.run") as run:
+            run.return_value.returncode = 0
+            result = command_login(self.store, self.login_args())
+
+        self.assertEqual(result, 0)
+        self.assertEqual(run.call_args.args[0], ["/bin/codex", "login"])
+        self.assertEqual(
+            run.call_args.kwargs["env"]["CODEX_HOME"],
+            str(self.store.tool_home("codex", "personal")),
+        )
+
+    def test_device_login_is_optional_and_passed_to_codex(self) -> None:
+        with patch("aicx.cli.find_binary", return_value="/bin/codex"), patch(
+            "aicx.cli.native_status", return_value={"logged_in": False}
+        ), patch("aicx.providers.find_binary", return_value="/bin/codex"), patch(
+            "aicx.providers.native_status", return_value={"logged_in": False}
+        ), patch("aicx.providers.subprocess.run") as run:
+            run.return_value.returncode = 0
+            result = command_login(
+                self.store, self.login_args(device_auth=True)
+            )
+
+        self.assertEqual(result, 0)
+        self.assertEqual(
+            run.call_args.args[0], ["/bin/codex", "login", "--device-auth"]
+        )
+
+    def test_existing_independent_login_is_selected_without_reauthentication(self) -> None:
+        home = self.store.create_profile("codex", "personal")
+        auth = home / "auth.json"
+        original = '{"tokens":{"refresh_token":"fake-independent-refresh"}}\n'
+        auth.write_text(original, encoding="utf-8")
+
+        with patch("aicx.cli.find_binary", return_value="/bin/codex"), patch(
+            "aicx.cli.native_status", return_value={"logged_in": True}
+        ), patch("aicx.cli.login") as provider_login:
+            result = command_login(self.store, self.login_args())
+
+        self.assertEqual(result, 0)
+        provider_login.assert_not_called()
+        self.assertEqual(auth.read_text(encoding="utf-8"), original)
+        self.assertEqual(self.store.get_active("codex"), "personal")
+
+    def test_forced_login_unlinks_only_local_auth_and_never_logs_out(self) -> None:
+        home = self.store.create_profile("codex", "personal")
+        (home / "auth.json").write_text(
+            '{"tokens":{"refresh_token":"fake-cloned-refresh"}}\n',
+            encoding="utf-8",
+        )
+        (home / ".credentials.json").write_text(
+            '{"mcp":"fake-unrelated-oauth"}\n', encoding="utf-8"
+        )
+        session = home / "sessions" / "2026" / "thread.jsonl"
+        session.parent.mkdir(parents=True)
+        session.write_text("saved conversation\n", encoding="utf-8")
+        commands: list[list[str]] = []
+
+        def run_login(command: list[str], **kwargs: object) -> SimpleNamespace:
+            self.assertFalse((home / "auth.json").exists())
+            commands.append(command)
+            return SimpleNamespace(returncode=0)
+
+        with patch("aicx.cli.find_binary", return_value="/bin/codex"), patch(
+            "aicx.providers.find_binary", return_value="/bin/codex"
+        ), patch("aicx.providers.subprocess.run", side_effect=run_login):
+            result = command_login(self.store, self.login_args(force=True))
+
+        self.assertEqual(result, 0)
+        self.assertEqual(commands, [["/bin/codex", "login"]])
+        self.assertNotIn("logout", " ".join(part for command in commands for part in command))
+        self.assertEqual(session.read_text(encoding="utf-8"), "saved conversation\n")
+        self.assertTrue((home / ".credentials.json").exists())
+        self.assertIn(
+            'cli_auth_credentials_store = "file"',
+            (home / "config.toml").read_text(encoding="utf-8"),
+        )
+
+    def test_forced_login_handles_missing_auth_file(self) -> None:
+        self.store.create_profile("codex", "personal")
+        with patch("aicx.cli.find_binary", return_value="/bin/codex"), patch(
+            "aicx.providers.find_binary", return_value="/bin/codex"
+        ), patch("aicx.providers.subprocess.run") as run:
+            run.return_value.returncode = 0
+            self.assertEqual(
+                command_login(self.store, self.login_args(force=True)), 0
+            )
+        self.assertEqual(run.call_args.args[0], ["/bin/codex", "login"])
+
+    def test_codex_adopt_starts_fresh_login_and_selects_on_success(self) -> None:
+        source = self.root / ".codex"
+        session = source / "sessions" / "2026" / "thread.jsonl"
+        session.parent.mkdir(parents=True)
+        session.write_text("saved conversation\n", encoding="utf-8")
+        (source / "auth.json").write_text(
+            '{"tokens":{"refresh_token":"fake-source-refresh"}}\n',
+            encoding="utf-8",
+        )
+        args = argparse.Namespace(tool="codex", profile="personal", source=source)
+        output = StringIO()
+
+        with patch("aicx.cli.find_binary", return_value="/bin/codex"), patch(
+            "aicx.providers.find_binary", return_value="/bin/codex"
+        ), patch("aicx.providers.subprocess.run") as run, redirect_stdout(output):
+            run.return_value.returncode = 0
+            from aicx.cli import command_adopt
+
+            result = command_adopt(self.store, args)
+
+        home = self.store.tool_home("codex", "personal")
+        self.assertEqual(result, 0)
+        self.assertFalse((home / "auth.json").exists())
+        self.assertEqual((home / "sessions" / "2026" / "thread.jsonl").read_text(), "saved conversation\n")
+        self.assertEqual(run.call_args.args[0], ["/bin/codex", "login"])
+        self.assertEqual(run.call_args.kwargs["env"]["CODEX_HOME"], str(home))
+        self.assertEqual(self.store.get_active("codex"), "personal")
+        self.assertIn("intentionally not copied", output.getvalue())
+        shared = self.store.root / "shared" / "codex-history" / "sessions" / "2026" / "thread.jsonl"
+        self.assertEqual(shared.read_text(encoding="utf-8"), "saved conversation\n")
+        self.assertFalse(any(path.name == "auth.json" for path in (self.store.root / "shared").rglob("*")))
+
+
+class CodexAuthDiagnosticsTests(TemporaryStoreTestCase):
+    @staticmethod
+    def write_oauth(home: Path, refresh_token: str) -> None:
+        home.mkdir(parents=True, exist_ok=True)
+        (home / "auth.json").write_text(
+            json.dumps(
+                {
+                    "auth_mode": "chatgpt",
+                    "OPENAI_API_KEY": None,
+                    "tokens": {
+                        "id_token": "fake-id-token",
+                        "access_token": "fake-access-token",
+                        "refresh_token": refresh_token,
+                        "account_id": "fake-account",
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    def run_doctor(self, default_codex_home: Path) -> str:
+        output = StringIO()
+        with patch("aicx.cli.shutil.which", return_value=None), patch(
+            "aicx.cli.default_home", return_value=default_codex_home
+        ), redirect_stdout(output):
+            self.assertEqual(command_doctor(self.store), 0)
+        return output.getvalue()
+
+    def test_duplicate_oauth_is_detected_without_printing_token(self) -> None:
+        default_home = self.root / ".codex"
+        personal = self.store.create_profile("codex", "personal")
+        work = self.store.create_profile("codex", "work")
+        shared = "fake-shared-refresh-value"
+        for home in (default_home, personal, work):
+            self.write_oauth(home, shared)
+
+        output = self.run_doctor(default_home)
+
+        self.assertIn("duplicated Codex OAuth credentials detected", output)
+        self.assertIn("default Codex home", output)
+        self.assertIn("codex/personal", output)
+        self.assertIn("codex/work", output)
+        self.assertIn("aicx login codex personal --force", output)
+        self.assertIn("do not run codex logout", output)
+        self.assertNotIn(shared, output)
+        self.assertNotIn(codex_oauth_fingerprint(default_home / "auth.json"), output)
+
+    def test_unique_api_key_missing_and_partial_auth_are_not_duplicates(self) -> None:
+        default_home = self.root / ".codex"
+        personal = self.store.create_profile("codex", "personal")
+        work = self.store.create_profile("codex", "work")
+        api = self.store.create_profile("codex", "api")
+        partial = self.store.create_profile("codex", "partial")
+        self.write_oauth(personal, "fake-personal-refresh")
+        self.write_oauth(work, "fake-work-refresh")
+        (api / "auth.json").write_text(
+            '{"auth_mode":"apikey","OPENAI_API_KEY":"fake-api-key"}',
+            encoding="utf-8",
+        )
+        (partial / "auth.json").write_text(
+            '{"auth_mode":"chatgpt","tokens":{"access_token":"fake-access"}}',
+            encoding="utf-8",
+        )
+        claude = self.store.create_profile("claude", "personal")
+        self.write_oauth(claude, "fake-personal-refresh")
+
+        output = self.run_doctor(default_home)
+
+        self.assertIn("no duplicated OAuth credentials", output)
+        self.assertNotIn("WARNING: duplicated", output)
+
+    def test_malformed_auth_is_reported_but_does_not_fail_doctor(self) -> None:
+        default_home = self.root / ".codex"
+        personal = self.store.create_profile("codex", "personal")
+        (personal / "auth.json").write_text("{not-json", encoding="utf-8")
+
+        output = self.run_doctor(default_home)
+
+        self.assertIn("could not inspect 1 auth file", output)
+        self.assertIn("skipped them", output)
+
+    def test_unknown_auth_schema_is_reported_without_exposing_values(self) -> None:
+        default_home = self.root / ".codex"
+        personal = self.store.create_profile("codex", "personal")
+        unknown_value = "fake-future-credential"
+        (personal / "auth.json").write_text(
+            json.dumps(
+                {"auth_mode": "future-mode", "future_secret": unknown_value}
+            ),
+            encoding="utf-8",
+        )
+
+        output = self.run_doctor(default_home)
+
+        self.assertIn("could not inspect 1 auth file", output)
+        self.assertNotIn(unknown_value, output)
+
+    def test_legacy_refresh_schema_is_fingerprinted_without_returning_secret(self) -> None:
+        auth_path = self.root / "legacy-auth.json"
+        fake_refresh = "fake-legacy-refresh"
+        auth_path.write_text(
+            json.dumps({"refresh_token": fake_refresh}), encoding="utf-8"
+        )
+
+        inspection = inspect_codex_auth_file(auth_path)
+
+        self.assertEqual(inspection.state, "chatgpt-oauth")
+        self.assertIsNotNone(inspection.oauth_fingerprint)
+        self.assertNotEqual(inspection.oauth_fingerprint, fake_refresh)
+
+    def test_diagnostic_helper_groups_only_matching_refresh_tokens(self) -> None:
+        first = self.root / "first"
+        second = self.root / "second"
+        third = self.root / "third"
+        self.write_oauth(first, "fake-same-refresh")
+        self.write_oauth(second, "fake-same-refresh")
+        self.write_oauth(third, "fake-unique-refresh")
+
+        diagnostics = codex_auth_diagnostics(
+            (("first", first), ("second", second), ("third", third))
+        )
+
+        self.assertEqual(diagnostics.duplicate_groups, (("first", "second"),))
+        self.assertEqual(diagnostics.uninspectable, ())
 
 
 class ClaudeTests(TemporaryStoreTestCase):

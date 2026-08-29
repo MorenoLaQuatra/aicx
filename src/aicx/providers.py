@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Sequence
 
+from .codex_auth import prepare_codex_reauthentication
 from .errors import AicxError
 from .store import Store, validate_tool
 
@@ -125,9 +126,11 @@ def login(
     force: bool = False,
     extra_args: Sequence[str] = (),
 ) -> int:
-    store.create_profile(tool, profile)
+    home = store.create_profile(tool, profile)
     binary = find_binary(tool)
     spec = spec_for(tool)
+    if force and tool == "codex":
+        prepare_codex_reauthentication(home)
     if not force:
         status = native_status(store, tool, profile)
         if status["logged_in"]:

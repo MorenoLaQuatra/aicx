@@ -8,9 +8,11 @@ import sqlite3
 import stat
 import tempfile
 from datetime import datetime, timezone
+from functools import partial
 from pathlib import Path
 from typing import Any
 
+from .codex_auth import CODEX_CREDENTIAL_ROOT_ENTRIES
 from .errors import AicxError
 
 UTC = timezone.utc
@@ -260,7 +262,11 @@ class Store:
                 source,
                 temp_target,
                 symlinks=True,
-                ignore=_ignore_special_files,
+                ignore=(
+                    partial(codex_adopt_ignore, source)
+                    if tool == "codex"
+                    else _ignore_special_files
+                ),
             )
             if tool == "claude" and not (temp_target / ".claude.json").exists():
                 # Claude stores this state file beside ~/.claude by default, but
@@ -532,4 +538,18 @@ def _ignore_special_files(directory: str, names: list[str]) -> list[str]:
         if stat.S_ISLNK(mode) or stat.S_ISREG(mode) or stat.S_ISDIR(mode):
             continue
         ignored.append(name)
+    return ignored
+
+
+def codex_adopt_ignore(
+    source: Path, directory: str, names: list[str]
+) -> list[str]:
+    """Exclude transient files and every known Codex credential store."""
+    ignored = _ignore_special_files(directory, names)
+    if Path(directory).resolve() == source.resolve():
+        ignored.extend(
+            name
+            for name in names
+            if name in CODEX_CREDENTIAL_ROOT_ENTRIES and name not in ignored
+        )
     return ignored
