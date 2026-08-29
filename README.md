@@ -26,23 +26,33 @@ aicx doctor
 
 ## Set up two accounts
 
-Log in with the official CLI, then let `aicx` adopt that account under a name.
-
 ### Codex example
 
 ```bash
-# First account
-codex login
-aicx adopt codex personal
-codex logout
-
-# Second account
-codex login
-aicx adopt codex work
+aicx login codex personal
+aicx login codex work
 ```
 
-`adopt` copies the current login, settings, and saved conversations. It does not
-change or remove the original Codex directory.
+Each command launches the official Codex login inside that profile's private
+`CODEX_HOME`, so every profile receives an independently issued OAuth session.
+Standard browser OAuth is the default. Device-code login is optional and is
+mainly useful on headless or remote machines:
+
+```bash
+aicx login codex personal --device-auth
+```
+
+If you already have Codex settings and conversations under `~/.codex`, import
+the safe local state with:
+
+```bash
+aicx adopt codex personal
+```
+
+For Codex, `adopt` intentionally excludes CLI and MCP OAuth credential files,
+fixes profile-local configuration and session paths, then starts a fresh browser
+login for the new profile. It does not change the source directory. Codex OAuth
+credentials are never copied between profiles.
 
 ### Claude Code example
 
@@ -150,6 +160,29 @@ export AICX_CLAUDE_HISTORY=isolated
 Credentials remain private to each account profile. They are never shared with
 the conversation store.
 
+## Codex OAuth troubleshooting
+
+If Codex or `codex_apps` fails with `HTTP 401`, `token_revoked`, or
+`Encountered invalidated oauth token`, older aicx versions may have copied one
+rotating OAuth refresh token into more than one profile.
+
+```bash
+aicx doctor
+aicx accounts codex
+aicx login codex personal --force
+aicx login codex work --force
+```
+
+Run the forced login once for each affected profile. The safe forced-login flow
+removes only that profile's local Codex CLI credential before starting a fresh
+login. It preserves settings, sessions, history, MCP credentials, and the
+profile name, and it does not run `codex logout` or revoke a token that an older
+cloned profile may still hold.
+
+Do not use `codex logout` to migrate profiles that may contain cloned OAuth
+credentials. `aicx doctor` compares one-way refresh-token fingerprints and
+never prints credential values.
+
 ## TODO
 
 - Test the complete workflow with multiple real Claude Code accounts. Multiple
@@ -162,6 +195,7 @@ the conversation store.
 
 - [Command cheatsheet](cheatsheet.md)
 - [Architecture and storage](docs/architecture.md)
+- [Changelog and migration notes](CHANGELOG.md)
 - [Contributing](CONTRIBUTING.md)
 
 ## License

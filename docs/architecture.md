@@ -52,10 +52,33 @@ session must not be active under two account profiles simultaneously. Set
 ### Codex
 
 - Isolation: `CODEX_HOME`.
-- Authentication: `codex login` and `codex login status`.
+- Authentication: independent `codex login` sessions and `codex login status`.
 - Credential storage: profile-local file storage selected in `config.toml`.
 - Usage and sessions: JSON-RPC over `codex app-server --stdio`.
 - Active-session stop: `thread/read`, then `turn/interrupt`.
+
+Every profile config pins `cli_auth_credentials_store = "file"`, which makes
+CLI auth deterministic at `<profile>/codex/auth.json`. Current Codex can also
+store file-backed MCP OAuth credentials at `<profile>/codex/.credentials.json`.
+Keyring-backed modes can pair the OS keyring with encrypted files under
+`<profile>/codex/secrets/`. None of these credential stores is copied by Codex
+adoption. `aicx adopt codex PROFILE` imports safe settings, rollouts, and local
+state, reconciles absolute thread paths, synchronizes history, and then starts
+the official browser login inside the new profile. The profile becomes active
+only after login succeeds.
+
+Forced Codex reauthentication unlinks only the selected profile's local
+`auth.json` before it launches `codex login`. It deliberately does not invoke
+`codex logout`: older aicx releases could clone a rotating refresh token across
+homes, and a server-side revocation from one clone would invalidate the others.
+Unrelated MCP OAuth credentials, settings, session databases, and conversation
+history remain intact.
+
+`aicx doctor` inspects the normal Codex home and every aicx Codex profile. It
+recognizes current ChatGPT OAuth serialization, older refresh-token layouts,
+API-key-only auth, partial files, and malformed files. Duplicate comparison uses
+only SHA-256 fingerprints in memory; tokens and fingerprints are not displayed.
+Malformed or unknown files produce a warning without making `doctor` fail.
 
 The RPC client uses a background line reader because a text-buffered
 `select`/`readline` loop can stall when a notification and response arrive in a

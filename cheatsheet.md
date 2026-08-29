@@ -10,17 +10,24 @@ aicx doctor
 ## Add accounts
 
 ```bash
-# Adopt the account currently used by each official CLI
-codex login
+# Browser OAuth is the default; each profile gets an independent session
+aicx login codex personal
+aicx login codex work
+
+# Optional device-code login for headless or remote machines
+aicx login codex personal --device-auth
+
+# Import safe settings/history from ~/.codex, then start a fresh browser login
 aicx adopt codex personal
 
+# Claude adoption retains its existing behavior
 claude auth login
 aicx adopt claude personal
-
-# Or log in directly inside a new aicx profile
-aicx login codex work --device-auth
 aicx login claude work --sso
 ```
+
+Codex `adopt` never copies OAuth credentials. Do not run `codex logout` as part
+of migration from an older adopted profile.
 
 ## Launch and switch
 
@@ -118,6 +125,17 @@ aicx --help
 aicx balance --help
 aicx doctor
 ```
+
+If Codex reports `HTTP 401`, `token_revoked`, or an invalidated OAuth token:
+
+```bash
+aicx doctor
+aicx accounts codex
+aicx login codex PROFILE --force
+```
+
+Repeat the safe forced login for every affected Codex profile. It removes only
+the selected profile's local CLI auth and never invokes `codex logout`.
 
 - Data: `~/.local/share/aicx`
 - Custom data location: `AICX_HOME=/path/to/data`
