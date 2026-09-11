@@ -57,15 +57,18 @@ credentials are never copied between profiles.
 ### Claude Code example
 
 ```bash
-# First account
-claude auth login
-aicx adopt claude personal
-claude auth logout
+# Create and launch each isolated profile once
+aicx login claude work
+aicx claude @work       # complete Claude's standard login/onboarding if prompted, then exit
 
-# Second account
-claude auth login
-aicx adopt claude work
+aicx login claude personal
+aicx claude @personal   # complete Claude's standard login/onboarding if prompted, then exit
 ```
+
+Claude may finish its normal login or first-run onboarding when a profile is
+launched for the first time. Complete it inside that `@profile`; no global
+`claude auth logout` is needed. This differs from Codex, whose independent
+profile login is completed directly by `aicx login codex PROFILE`.
 
 Profile names are yours to choose. `personal`, `work`, and `client` are only
 examples.
@@ -185,8 +188,6 @@ never prints credential values.
 
 ## TODO
 
-- Test the complete workflow with multiple real Claude Code accounts. Multiple
-  Codex accounts are tested.
 - Add and test VS Code account integration.
 - On macOS, confirm profile-local Claude credentials when the login Keychain
   holds a `Claude Code-credentials` item (Codex is pinned to file storage).
